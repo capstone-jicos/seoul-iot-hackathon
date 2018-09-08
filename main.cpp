@@ -15,7 +15,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 // ----------------------------------------------------------------------------
-
+#include "XNucleoIKS01A2.h"
 #include "simplem2mclient.h"
 #ifdef TARGET_LIKE_MBED
 #include "mbed.h"
@@ -24,8 +24,15 @@
 #include "common_button_and_led.h"
 #include "blinky.h"
 
+DigitalOut led(LED2);
+AnalogIn CDS(A0);
+AnalogIn Pressure(A3);
+
+static XNucleoIKS01A2 *mems_expansion_board = XNucleoIKS01A2::instance(D14, D15, D4, D5);
 // event based LED blinker, controlled via pattern_resource
 static Blinky blinky;
+static HTS221Sensor *hum_temp = mems_expansion_board->ht_sensor;
+
 
 static void main_application(void);
 
@@ -37,6 +44,10 @@ int main(void)
 // Pointers to the resources that will be created in main_application().
 static M2MResource* button_res;
 static M2MResource* pattern_res;
+static M2MResource* temp_res;
+static M2MResource* hum_res;
+static M2MResource* cds_res;
+static M2MResource* led_res;
 
 // Pointer to mbedClient, used for calling close function.
 static SimpleM2MClient *client;
@@ -59,7 +70,41 @@ void blink_callback(void *)
         printf("out of memory error\n");
     }
 }
-
+/* Helper function for printing floats & doubles */
+static char *print_double(char* str, double v, int decimalDigits=2)
+{
+	  int i = 1;
+	    int intPart, fractPart;
+		  int len;
+		    char *ptr;
+			 
+			   /* prepare decimal digits multiplicator */
+			     for (;decimalDigits!=0; i*=10, decimalDigits--);
+				  
+				    /* calculate integer & fractinal parts */
+					  intPart = (int)v;
+					    fractPart = (int)((v-(double)(int)v)*i);
+						 
+						   /* fill in integer part */
+						     sprintf(str, "%i.", intPart);
+							  
+							    /* prepare fill in of fractional part */
+								  len = strlen(str);
+								    ptr = &str[len];
+									 
+									   /* fill in leading fractional zeros */
+									     for (i/=10;i>1; i/=10, ptr++) {
+											     if (fractPart >= i) {
+													       break;
+														       }
+															       *ptr = '0';
+																     }
+																	  
+																	    /* fill in (rest of) fractional part */
+																		  sprintf(ptr, "%i", fractPart);
+																		   
+																		     return str;
+}
 void button_notification_status_callback(const M2MBase& object, const NoticationDeliveryStatus status)
 {
     switch(status) {
@@ -114,6 +159,12 @@ void main_application(void)
     // https://github.com/ARMmbed/sd-driver/issues/93 (IOTMORF-2327)
     // SD-driver initialization can fails with bd->init() -5005. This wait will
     // allow the board more time to initialize.
+ float value1=0, old_val1=25;
+ float value2=0, old_val2=30;
+ float cdsVal=0;
+ float sensorReading=0;
+ char buffer1[32],buffer2[32],buffer3[32], buffer4[32];
+
 #ifdef TARGET_LIKE_MBED
     wait(2);
 #endif
@@ -134,7 +185,7 @@ void main_application(void)
         printf("ERROR - platform_init() failed!\n");
         return;
     }
-
+ hum_temp->enable();
     // Print platform information
     mcc_platform_sw_build_info();
 
@@ -177,6 +228,14 @@ void main_application(void)
     pattern_res = mbedClient.add_cloud_resource(3201, 0, 5853, "pattern_resource", M2MResourceInstance::STRING,
                                M2MBase::GET_PUT_ALLOWED, "500:500:500:500", false, (void*)pattern_updated, NULL);
 
+	temp_res = mbedClient.add_cloud_resource(3303,0,5700, "temp_resource", M2MResourceInstance::FLOAT, M2MBase::GET_ALLOWED, 0, true, NULL, (void*)button_notification_status_callback);
+
+	hum_res = mbedClient.add_cloud_resource(3304,0,5700, "hum_resource", M2MResourceInstance::FLOAT, M2MBase::GET_ALLOWED, 0, true, NULL, (void*)button_notification_status_callback);
+
+	cds_res = mbedClient.add_cloud_resource(3301,0,5700, "cds_resouce", M2MResourceInstance::FLOAT, M2MBase::GET_ALLOWED, 0, true, NULL, (void*)button_notification_status_callback);
+
+	led_res = mbedClient.add_cloud_resource(3311,0,5850, "cds_condition", M2MResourceInstance::INTEGER, M2MBase::GET_ALLOWED, 0, true, NULL, (void*)button_notification_status_callback);
+
     // Create resource for starting the led blinking. Path of this resource will be: 3201/0/5850.
     mbedClient.add_cloud_resource(3201, 0, 5850, "blink_resource", M2MResourceInstance::STRING,
                              M2MBase::POST_ALLOWED, "", false, (void*)blink_callback, NULL);
@@ -190,14 +249,38 @@ void main_application(void)
                  M2MBase::POST_ALLOWED, NULL, false, (void*)factory_reset, NULL);
 
     mbedClient.register_and_connect();
+    mcc_platform_do_wait(10000);
 
     // Check if client is registering or registered, if true sleep and repeat.
     while (mbedClient.is_register_called()) {
         static int button_count = 0;
-        mcc_platform_do_wait(100);
+        mcc_platform_do_wait(1000);
         if (mcc_platform_button_clicked()) {
             button_res->set_value(++button_count);
         }
+		hum_temp->get_temperature(&value1);
+		if(old_val1 != value1)
+		{
+			old_val1=value1;
+			printf("HTS221: [temp] %7s C\r\n", print_double(buffer1, value1));
+			temp_res -> set_value(value1);
+		}
+		
+		hum_temp->get_humidity(&value2);
+		if(old_val2 != value2) {
+			old_val2=value2;
+			printf("HTS221: [hum] %7s%%\r\n", print_double(buffer2, value2));
+			hum_res -> set_value(value2);
+		}
+
+		cdsVal=CDS.read();
+		cds_res -> set_value(cdsVal);
+		printf("CDS: [cds value] %7s\r\n", print_double(buffer3, cdsVal));
+
+		sensorReading=Pressure.read();
+		printf("Pressure: %7s\r\n", print_double(buffer4, sensorReading)); 
+
+
     }
 
     // Client unregistered, exit program.
